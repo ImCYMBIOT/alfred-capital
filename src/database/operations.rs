@@ -221,6 +221,189 @@ impl Database {
         
         Ok(count)
     }
+
+    /// Update net-flow data atomically with a new inflow amount
+    pub fn update_net_flow_inflow(&self, amount: &str) -> Result<(), DbError> {
+        let conn = self.conn.lock().map_err(|_| DbError::Operation("Failed to acquire lock".to_string()))?;
+        
+        let tx = conn.unchecked_transaction()?;
+        
+        // Get current values
+        let current_inflow: String = tx.query_row(
+            "SELECT total_inflow FROM net_flows WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        
+        // Calculate new inflow using NetFlowCalculator
+        let new_inflow = crate::models::NetFlowCalculator::add_inflow(&current_inflow, amount)
+            .map_err(|e| DbError::Operation(format!("Failed to calculate new inflow: {}", e)))?;
+        
+        // Get current outflow to recalculate net flow
+        let current_outflow: String = tx.query_row(
+            "SELECT total_outflow FROM net_flows WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        
+        // Calculate new net flow
+        let new_net_flow = crate::models::NetFlowCalculator::calculate_net(&new_inflow, &current_outflow)
+            .map_err(|e| DbError::Operation(format!("Failed to calculate net flow: {}", e)))?;
+        
+        // Update the net_flows table
+        tx.execute(
+            "UPDATE net_flows SET total_inflow = ?1, net_flow = ?2, last_updated = strftime('%s', 'now') WHERE id = 1",
+            params![new_inflow, new_net_flow],
+        )?;
+        
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Update net-flow data atomically with a new outflow amount
+    pub fn update_net_flow_outflow(&self, amount: &str) -> Result<(), DbError> {
+        let conn = self.conn.lock().map_err(|_| DbError::Operation("Failed to acquire lock".to_string()))?;
+        
+        let tx = conn.unchecked_transaction()?;
+        
+        // Get current values
+        let current_outflow: String = tx.query_row(
+            "SELECT total_outflow FROM net_flows WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        
+        // Calculate new outflow using NetFlowCalculator
+        let new_outflow = crate::models::NetFlowCalculator::add_outflow(&current_outflow, amount)
+            .map_err(|e| DbError::Operation(format!("Failed to calculate new outflow: {}", e)))?;
+        
+        // Get current inflow to recalculate net flow
+        let current_inflow: String = tx.query_row(
+            "SELECT total_inflow FROM net_flows WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        
+        // Calculate new net flow
+        let new_net_flow = crate::models::NetFlowCalculator::calculate_net(&current_inflow, &new_outflow)
+            .map_err(|e| DbError::Operation(format!("Failed to calculate net flow: {}", e)))?;
+        
+        // Update the net_flows table
+        tx.execute(
+            "UPDATE net_flows SET total_outflow = ?1, net_flow = ?2, last_updated = strftime('%s', 'now') WHERE id = 1",
+            params![new_outflow, new_net_flow],
+        )?;
+        
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Update net-flow data atomically based on transfer direction
+    pub fn update_net_flow_with_transfer(&self, amount: &str, direction: &crate::models::TransferDirection) -> Result<(), DbError> {
+        match direction {
+            crate::models::TransferDirection::ToBinance => self.update_net_flow_inflow(amount),
+            crate::models::TransferDirection::FromBinance => self.update_net_flow_outflow(amount),
+            crate::models::TransferDirection::NotRelevant => Ok(()), // No update needed for irrelevant transfers
+        }
+    }
+
+    /// Store a processed transfer and update net-flow data atomically
+    pub fn store_transfer_and_update_net_flow(&self, transfer: &crate::models::ProcessedTransfer) -> Result<(), DbError> {
+        let conn = self.conn.lock().map_err(|_| DbError::Operation("Failed to acquire lock".to_string()))?;
+        
+        let tx = conn.unchecked_transaction()?;
+        
+        // Convert direction to string for database storage
+        let direction_str = match transfer.direction {
+            crate::models::TransferDirection::ToBinance => "inflow",
+            crate::models::TransferDirection::FromBinance => "outflow",
+            crate::models::TransferDirection::NotRelevant => return Ok(()), // Don't store irrelevant transfers
+        };
+        
+        // Store the transaction
+        tx.execute(
+            "INSERT INTO transactions (block_number, transaction_hash, log_index, from_address, to_address, amount, timestamp, direction)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                transfer.block_number,
+                transfer.transaction_hash,
+                transfer.log_index,
+                transfer.from_address,
+                transfer.to_address,
+                transfer.amount,
+                transfer.timestamp,
+                direction_str
+            ],
+        )?;
+        
+        // Update net-flow data based on direction
+        match transfer.direction {
+            crate::models::TransferDirection::ToBinance => {
+                // Get current inflow
+                let current_inflow: String = tx.query_row(
+                    "SELECT total_inflow FROM net_flows WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                
+                // Calculate new inflow
+                let new_inflow = crate::models::NetFlowCalculator::add_inflow(&current_inflow, &transfer.amount)
+                    .map_err(|e| DbError::Operation(format!("Failed to calculate new inflow: {}", e)))?;
+                
+                // Get current outflow to recalculate net flow
+                let current_outflow: String = tx.query_row(
+                    "SELECT total_outflow FROM net_flows WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                
+                // Calculate new net flow
+                let new_net_flow = crate::models::NetFlowCalculator::calculate_net(&new_inflow, &current_outflow)
+                    .map_err(|e| DbError::Operation(format!("Failed to calculate net flow: {}", e)))?;
+                
+                // Update net flows
+                tx.execute(
+                    "UPDATE net_flows SET total_inflow = ?1, net_flow = ?2, last_updated = strftime('%s', 'now') WHERE id = 1",
+                    params![new_inflow, new_net_flow],
+                )?;
+            },
+            crate::models::TransferDirection::FromBinance => {
+                // Get current outflow
+                let current_outflow: String = tx.query_row(
+                    "SELECT total_outflow FROM net_flows WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                
+                // Calculate new outflow
+                let new_outflow = crate::models::NetFlowCalculator::add_outflow(&current_outflow, &transfer.amount)
+                    .map_err(|e| DbError::Operation(format!("Failed to calculate new outflow: {}", e)))?;
+                
+                // Get current inflow to recalculate net flow
+                let current_inflow: String = tx.query_row(
+                    "SELECT total_inflow FROM net_flows WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                
+                // Calculate new net flow
+                let new_net_flow = crate::models::NetFlowCalculator::calculate_net(&current_inflow, &new_outflow)
+                    .map_err(|e| DbError::Operation(format!("Failed to calculate net flow: {}", e)))?;
+                
+                // Update net flows
+                tx.execute(
+                    "UPDATE net_flows SET total_outflow = ?1, net_flow = ?2, last_updated = strftime('%s', 'now') WHERE id = 1",
+                    params![new_outflow, new_net_flow],
+                )?;
+            },
+            crate::models::TransferDirection::NotRelevant => {
+                // This case is already handled above, but included for completeness
+            }
+        }
+        
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 /// Represents a row from the transactions table
