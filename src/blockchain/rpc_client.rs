@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use crate::models::RawLog;
+use crate::error::{IndexerError, RpcError as NewRpcError};
+use crate::logging::{LogContext, PerformanceMonitor, MetricsLogger};
+use crate::retry::RetryUtils;
 
 #[derive(Error, Debug)]
 pub enum RpcError {
@@ -85,8 +88,33 @@ pub struct RpcClient {
 
 impl RpcClient {
     pub fn new(endpoint: String) -> Self {
+        let context = LogContext::new("rpc_client", "initialization")
+            .with_metadata("endpoint", serde_json::json!(endpoint));
+        context.info("Initializing RPC client");
+        
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("Failed to create HTTP client"),
+            endpoint,
+        }
+    }
+
+    /// Enhanced RPC client with timeout and connection pooling
+    pub fn new_with_config(endpoint: String, timeout_seconds: u64) -> Self {
+        let context = LogContext::new("rpc_client", "initialization")
+            .with_metadata("endpoint", serde_json::json!(endpoint))
+            .with_metadata("timeout_seconds", serde_json::json!(timeout_seconds));
+        context.info("Initializing RPC client with custom configuration");
+        
+        Self {
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(timeout_seconds))
+                .pool_max_idle_per_host(10)
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("Failed to create HTTP client"),
             endpoint,
         }
     }
@@ -120,6 +148,66 @@ impl RpcClient {
             .ok_or_else(|| RpcError::Rpc("No result in response".to_string()))
     }
 
+    /// Enhanced make_request with better error handling and logging
+    async fn make_request_enhanced(&self, method: &str, params: Vec<Value>) -> Result<Value, IndexerError> {
+        let context = LogContext::new("rpc_client", "make_request")
+            .with_metadata("method", serde_json::json!(method))
+            .with_metadata("endpoint", serde_json::json!(self.endpoint));
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params,
+            id: 1,
+        };
+
+        context.trace(&format!("Sending RPC request: {}", method));
+
+        let response = self
+            .client
+            .post(&self.endpoint)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| {
+                // Classify HTTP errors
+                if e.is_timeout() {
+                    IndexerError::Rpc(NewRpcError::Timeout { seconds: 30 })
+                } else if e.is_connect() {
+                    IndexerError::Rpc(NewRpcError::Connection(e.to_string()))
+                } else if e.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
+                    IndexerError::Rpc(NewRpcError::RateLimit { seconds: 60 })
+                } else {
+                    IndexerError::Rpc(NewRpcError::Http(e))
+                }
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_msg = format!("HTTP error: {} {}", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+            return Err(IndexerError::Rpc(NewRpcError::Connection(error_msg)));
+        }
+
+        let rpc_response: JsonRpcResponse = response.json().await
+            .map_err(|e| IndexerError::Rpc(NewRpcError::Http(e)))?;
+
+        if let Some(error) = rpc_response.error {
+            let rpc_error = match error.code {
+                -32700 => NewRpcError::InvalidResponse("Parse error".to_string()),
+                -32600 => NewRpcError::InvalidResponse("Invalid request".to_string()),
+                -32601 => NewRpcError::Method { code: error.code, message: error.message },
+                -32602 => NewRpcError::InvalidResponse("Invalid params".to_string()),
+                -32603 => NewRpcError::Method { code: error.code, message: error.message },
+                _ => NewRpcError::Method { code: error.code, message: error.message },
+            };
+            return Err(IndexerError::Rpc(rpc_error));
+        }
+
+        rpc_response
+            .result
+            .ok_or_else(|| IndexerError::Rpc(NewRpcError::InvalidResponse("No result in response".to_string())))
+    }
+
     pub async fn get_latest_block_number(&self) -> Result<u64, RpcError> {
         let result = self.make_request("eth_blockNumber", vec![]).await?;
         
@@ -131,6 +219,43 @@ impl RpcClient {
         let hex_without_prefix = hex_string.strip_prefix("0x").unwrap_or(hex_string);
         u64::from_str_radix(hex_without_prefix, 16)
             .map_err(|e| RpcError::Rpc(format!("Failed to parse block number: {}", e)))
+    }
+
+    /// Enhanced version with retry logic and better error handling
+    pub async fn get_latest_block_number_with_retry(&self) -> Result<u64, IndexerError> {
+        RetryUtils::retry_rpc("get_latest_block_number", || async {
+            let monitor = PerformanceMonitor::new("rpc_get_latest_block_number");
+            
+            let result = self.make_request_enhanced("eth_blockNumber", vec![]).await;
+            let duration = monitor.finish_with_result(&result);
+            
+            MetricsLogger::log_rpc_call("eth_blockNumber", duration, result.is_ok());
+            
+            match result {
+                Ok(value) => {
+                    let hex_string = value
+                        .as_str()
+                        .ok_or_else(|| IndexerError::Rpc(NewRpcError::InvalidResponse(
+                            "Block number is not a string".to_string()
+                        )))?;
+
+                    let hex_without_prefix = hex_string.strip_prefix("0x").unwrap_or(hex_string);
+                    let block_number = u64::from_str_radix(hex_without_prefix, 16)
+                        .map_err(|e| IndexerError::Processing(
+                            crate::error::ProcessingError::BlockParsing(
+                                format!("Failed to parse block number: {}", e)
+                            )
+                        ))?;
+
+                    let context = LogContext::new("rpc_client", "get_latest_block_number")
+                        .with_block_number(block_number);
+                    context.debug(&format!("Retrieved latest block number: {}", block_number));
+
+                    Ok(block_number)
+                }
+                Err(e) => Err(e),
+            }
+        }).await
     }
 
     pub async fn get_block(&self, block_number: u64) -> Result<Block, RpcError> {
@@ -148,6 +273,49 @@ impl RpcClient {
         
         serde_json::from_value(result)
             .map_err(|e| RpcError::Json(e))
+    }
+
+    /// Enhanced version with retry logic and better error handling
+    pub async fn get_block_with_retry(&self, block_number: u64) -> Result<Block, IndexerError> {
+        RetryUtils::retry_rpc("get_block", || async {
+            let monitor = PerformanceMonitor::new("rpc_get_block")
+                .with_metadata("block_number", serde_json::json!(block_number));
+            
+            let block_hex = format!("0x{:x}", block_number);
+            let params = vec![
+                serde_json::Value::String(block_hex),
+                serde_json::Value::Bool(true), // Include full transaction objects
+            ];
+            
+            let result = self.make_request_enhanced("eth_getBlockByNumber", params).await;
+            let duration = monitor.finish_with_result(&result);
+            
+            MetricsLogger::log_rpc_call("eth_getBlockByNumber", duration, result.is_ok());
+            
+            match result {
+                Ok(value) => {
+                    if value.is_null() {
+                        return Err(IndexerError::Rpc(NewRpcError::BlockNotFound { block_number }));
+                    }
+                    
+                    let block: Block = serde_json::from_value(value)
+                        .map_err(|e| IndexerError::Processing(
+                            crate::error::ProcessingError::BlockParsing(
+                                format!("Failed to parse block {}: {}", block_number, e)
+                            )
+                        ))?;
+
+                    let context = LogContext::new("rpc_client", "get_block")
+                        .with_block_number(block_number)
+                        .with_metadata("transaction_count", serde_json::json!(block.transactions.len()));
+                    context.debug(&format!("Retrieved block {} with {} transactions", 
+                        block_number, block.transactions.len()));
+
+                    Ok(block)
+                }
+                Err(e) => Err(e),
+            }
+        }).await
     }
 
     pub async fn get_logs(&self, filter: LogFilter) -> Result<Vec<RawLog>, RpcError> {
@@ -173,6 +341,70 @@ impl RpcClient {
         
         Ok(raw_logs)
     }
+
+    /// Enhanced version with retry logic and better error handling
+    pub async fn get_logs_with_retry(&self, filter: LogFilter) -> Result<Vec<RawLog>, IndexerError> {
+        RetryUtils::retry_rpc("get_logs", || async {
+            let monitor = PerformanceMonitor::new("rpc_get_logs")
+                .with_metadata("from_block", serde_json::json!(filter.from_block))
+                .with_metadata("to_block", serde_json::json!(filter.to_block));
+            
+            let params = vec![serde_json::to_value(&filter)
+                .map_err(|e| IndexerError::Rpc(NewRpcError::Json(e)))?];
+            
+            let result = self.make_request_enhanced("eth_getLogs", params).await;
+            let duration = monitor.finish_with_result(&result);
+            
+            MetricsLogger::log_rpc_call("eth_getLogs", duration, result.is_ok());
+            
+            match result {
+                Ok(value) => {
+                    let eth_logs: Vec<EthLog> = serde_json::from_value(value)
+                        .map_err(|e| IndexerError::Processing(
+                            crate::error::ProcessingError::LogParsing(
+                                format!("Failed to parse logs: {}", e)
+                            )
+                        ))?;
+                    
+                    // Convert EthLog to RawLog with error handling
+                    let mut raw_logs = Vec::new();
+                    for eth_log in eth_logs {
+                        let block_number = parse_hex_to_u64(&eth_log.block_number)
+                            .map_err(|e| IndexerError::Processing(
+                                crate::error::ProcessingError::BlockParsing(
+                                    format!("Invalid block number in log: {}", e)
+                                )
+                            ))?;
+                        
+                        let log_index = parse_hex_to_u32(&eth_log.log_index)
+                            .map_err(|e| IndexerError::Processing(
+                                crate::error::ProcessingError::LogParsing(
+                                    format!("Invalid log index: {}", e)
+                                )
+                            ))?;
+                        
+                        raw_logs.push(RawLog {
+                            address: eth_log.address,
+                            topics: eth_log.topics,
+                            data: eth_log.data,
+                            block_number,
+                            transaction_hash: eth_log.transaction_hash,
+                            log_index,
+                        });
+                    }
+
+                    let context = LogContext::new("rpc_client", "get_logs")
+                        .with_metadata("log_count", serde_json::json!(raw_logs.len()))
+                        .with_metadata("from_block", serde_json::json!(filter.from_block))
+                        .with_metadata("to_block", serde_json::json!(filter.to_block));
+                    context.debug(&format!("Retrieved {} logs", raw_logs.len()));
+
+                    Ok(raw_logs)
+                }
+                Err(e) => Err(e),
+            }
+        }).await
+    }
 }
 
 fn parse_hex_to_u64(hex_str: &str) -> Result<u64, RpcError> {
@@ -185,6 +417,27 @@ fn parse_hex_to_u32(hex_str: &str) -> Result<u32, RpcError> {
     let hex_without_prefix = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     u32::from_str_radix(hex_without_prefix, 16)
         .map_err(|e| RpcError::Rpc(format!("Failed to parse hex to u32: {}", e)))
+}
+
+/// Enhanced hex parsing with better error handling
+fn parse_hex_to_u64_enhanced(hex_str: &str) -> Result<u64, IndexerError> {
+    let hex_without_prefix = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    u64::from_str_radix(hex_without_prefix, 16)
+        .map_err(|e| IndexerError::Processing(
+            crate::error::ProcessingError::AmountParsing(
+                format!("Failed to parse hex '{}' to u64: {}", hex_str, e)
+            )
+        ))
+}
+
+fn parse_hex_to_u32_enhanced(hex_str: &str) -> Result<u32, IndexerError> {
+    let hex_without_prefix = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    u32::from_str_radix(hex_without_prefix, 16)
+        .map_err(|e| IndexerError::Processing(
+            crate::error::ProcessingError::AmountParsing(
+                format!("Failed to parse hex '{}' to u32: {}", hex_str, e)
+            )
+        ))
 }
 #
 [cfg(test)]

@@ -8,19 +8,36 @@ use log::{info, warn, error, debug};
 
 use crate::blockchain::{RpcClient, BlockProcessor};
 use crate::database::Database;
+use crate::error::IndexerError;
+use crate::logging::{LogContext, PerformanceMonitor, ErrorLogger, MetricsLogger};
+use crate::retry::CircuitBreaker;
 
 #[derive(Error, Debug)]
 pub enum MonitorError {
-    #[error("RPC error: {0}")]
-    Rpc(#[from] crate::blockchain::rpc_client::RpcError),
-    #[error("Database error: {0}")]
-    Database(#[from] crate::database::DbError),
-    #[error("Block processing error: {0}")]
-    Processing(#[from] crate::blockchain::block_processor::ProcessError),
+    #[error("Indexer error: {0}")]
+    Indexer(#[from] IndexerError),
     #[error("Monitor configuration error: {0}")]
     Config(String),
     #[error("Shutdown requested")]
     Shutdown,
+}
+
+impl From<crate::blockchain::rpc_client::RpcError> for MonitorError {
+    fn from(err: crate::blockchain::rpc_client::RpcError) -> Self {
+        MonitorError::Indexer(IndexerError::from(err))
+    }
+}
+
+impl From<crate::database::DbError> for MonitorError {
+    fn from(err: crate::database::DbError) -> Self {
+        MonitorError::Indexer(IndexerError::from(err))
+    }
+}
+
+impl From<crate::blockchain::block_processor::ProcessError> for MonitorError {
+    fn from(err: crate::blockchain::block_processor::ProcessError) -> Self {
+        MonitorError::Indexer(IndexerError::from(err))
+    }
 }
 
 pub struct BlockMonitorConfig {
@@ -47,6 +64,8 @@ pub struct BlockMonitor {
     database: Arc<Database>,
     pub config: BlockMonitorConfig,
     pub shutdown_signal: Arc<AtomicBool>,
+    rpc_circuit_breaker: Arc<CircuitBreaker>,
+    database_circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl BlockMonitor {
@@ -56,12 +75,17 @@ impl BlockMonitor {
         database: Database,
         config: Option<BlockMonitorConfig>,
     ) -> Self {
+        let context = LogContext::new("block_monitor", "initialization");
+        context.info("Initializing block monitor with circuit breakers");
+        
         Self {
             rpc_client: Arc::new(rpc_client),
             block_processor: Arc::new(block_processor),
             database: Arc::new(database),
             config: config.unwrap_or_default(),
             shutdown_signal: Arc::new(AtomicBool::new(false)),
+            rpc_circuit_breaker: Arc::new(CircuitBreaker::new(5, 60)), // 5 failures, 60s recovery
+            database_circuit_breaker: Arc::new(CircuitBreaker::new(3, 30)), // 3 failures, 30s recovery
         }
     }
 
@@ -170,43 +194,62 @@ impl BlockMonitor {
 
     /// Process a single block and return the number of transfers found
     async fn process_single_block(&self, block_number: u64) -> Result<u32, MonitorError> {
-        debug!("Processing block {}", block_number);
+        let monitor = PerformanceMonitor::new("process_single_block")
+            .with_metadata("block_number", serde_json::json!(block_number));
         
-        let transfers = self.block_processor.process_block(block_number).await?;
+        let context = LogContext::new("block_monitor", "process_single_block")
+            .with_block_number(block_number);
+        context.debug(&format!("Processing block {}", block_number));
+        
+        // Process block with circuit breaker protection
+        let transfers = {
+            let rpc_circuit_breaker = Arc::clone(&self.rpc_circuit_breaker);
+            rpc_circuit_breaker.execute(|| async {
+                self.block_processor.process_block(block_number).await
+                    .map_err(|e| IndexerError::from(e))
+            }).await?
+        };
+        
         let transfer_count = transfers.len() as u32;
 
-        // Store each transfer in the database and update net flows
-        for transfer in transfers {
-            if let Err(e) = self.database.store_transfer_and_update_net_flow(&transfer) {
-                error!("Failed to store transfer from block {}: {}", block_number, e);
-                return Err(MonitorError::Database(e));
+        // Store transfers with database circuit breaker protection
+        let database_circuit_breaker = Arc::clone(&self.database_circuit_breaker);
+        database_circuit_breaker.execute(|| async {
+            for transfer in &transfers {
+                self.database.store_transfer_and_update_net_flow(transfer)
+                    .map_err(|e| IndexerError::from(e))?;
             }
-        }
+            Ok::<(), IndexerError>(())
+        }).await?;
+
+        let duration = monitor.finish();
+        MetricsLogger::log_block_processed(block_number, transfer_count, duration);
+
+        let context = LogContext::new("block_monitor", "process_single_block")
+            .with_block_number(block_number)
+            .with_metadata("transfer_count", serde_json::json!(transfer_count))
+            .with_duration_ms(duration);
+        context.info(&format!("Successfully processed block {} with {} transfers", block_number, transfer_count));
 
         Ok(transfer_count)
     }
 
-    /// Get the latest block number with retry logic
+    /// Get the latest block number with retry logic and circuit breaker
     pub async fn get_latest_block_with_retry(&self) -> Result<u64, MonitorError> {
-        let mut retry_count = 0;
-        let mut delay = self.config.retry_delay_seconds;
+        let circuit_breaker = Arc::clone(&self.rpc_circuit_breaker);
+        
+        let result = circuit_breaker.execute(|| async {
+            self.rpc_client.get_latest_block_number_with_retry().await
+        }).await;
 
-        loop {
-            match self.rpc_client.get_latest_block_number().await {
-                Ok(block_number) => return Ok(block_number),
-                Err(e) => {
-                    retry_count += 1;
-                    if retry_count > self.config.max_retries {
-                        error!("Failed to get latest block number after {} retries: {}", self.config.max_retries, e);
-                        return Err(MonitorError::Rpc(e));
-                    }
-
-                    warn!("Failed to get latest block number (attempt {}/{}): {}", retry_count, self.config.max_retries, e);
-                    sleep(Duration::from_secs(delay)).await;
-
-                    // Exponential backoff with max delay
-                    delay = std::cmp::min(delay * 2, self.config.max_retry_delay_seconds);
-                }
+        match result {
+            Ok(block_number) => Ok(block_number),
+            Err(e) => {
+                let context = LogContext::new("block_monitor", "get_latest_block")
+                    .with_metadata("error_severity", serde_json::json!(format!("{:?}", e.severity())));
+                
+                ErrorLogger::log_error(&e, Some(context));
+                Err(MonitorError::Indexer(e))
             }
         }
     }

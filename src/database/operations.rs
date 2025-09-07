@@ -222,6 +222,38 @@ impl Database {
         Ok(count)
     }
 
+    /// Get recent transactions with pagination
+    pub fn get_recent_transactions(&self, limit: u32, offset: u32) -> Result<Vec<TransactionRow>, DbError> {
+        let conn = self.conn.lock().map_err(|_| DbError::Operation("Failed to acquire lock".to_string()))?;
+        
+        let mut stmt = conn.prepare(
+            "SELECT id, block_number, transaction_hash, log_index, from_address, to_address, amount, timestamp, direction, created_at
+             FROM transactions ORDER BY created_at DESC, id DESC LIMIT ?1 OFFSET ?2"
+        )?;
+        
+        let rows = stmt.query_map(params![limit, offset], |row| {
+            Ok(TransactionRow {
+                id: row.get(0)?,
+                block_number: row.get(1)?,
+                transaction_hash: row.get(2)?,
+                log_index: row.get(3)?,
+                from_address: row.get(4)?,
+                to_address: row.get(5)?,
+                amount: row.get(6)?,
+                timestamp: row.get(7)?,
+                direction: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        
+        let mut transactions = Vec::new();
+        for row in rows {
+            transactions.push(row?);
+        }
+        
+        Ok(transactions)
+    }
+
     /// Update net-flow data atomically with a new inflow amount
     pub fn update_net_flow_inflow(&self, amount: &str) -> Result<(), DbError> {
         let conn = self.conn.lock().map_err(|_| DbError::Operation("Failed to acquire lock".to_string()))?;
