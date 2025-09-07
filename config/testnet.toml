@@ -1,0 +1,41 @@
+# Testnet Environment Configuration
+# For testing with Polygon Mumbai testnet
+
+[rpc]
+# Mumbai testnet RPC endpoint
+endpoint = "https://rpc-mumbai.maticvigil.com/"
+timeout_seconds = 30
+max_retries = 3
+retry_delay_seconds = 1
+max_retry_delay_seconds = 30
+
+[database]
+# Testnet database
+path = "./testnet_blockchain.db"
+connection_pool_size = 5
+enable_wal_mode = true
+busy_timeout_ms = 3000
+
+[processing]
+# Faster processing for testnet (blocks are faster)
+poll_interval_seconds = 1
+batch_size = 25
+# POL token contract address on Mumbai testnet (placeholder)
+pol_token_address = "0x455e53bd25bfb4ed405b8b8c2db7ab87cd0a7e9f"
+max_blocks_per_batch = 5
+
+[api]
+enabled = true
+port = 8080
+host = "127.0.0.1"
+request_timeout_seconds = 15
+max_connections = 25
+
+[logging]
+# Verbose logging for testnet debugging
+level = "debug"
+format = "pretty"
+file_enabled = true
+file_path = "./logs/testnet_indexer.log"
+max_file_size_mb = 25
+max_files = 2

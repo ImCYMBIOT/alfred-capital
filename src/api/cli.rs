@@ -15,8 +15,9 @@ pub enum CliError {
 
 #[derive(Parser)]
 #[command(name = "polygon-pol-indexer")]
-#[command(about = "A CLI tool for querying POL token net-flow data")]
+#[command(about = "A CLI tool for querying POL token net-flow data\nCreated by Agnivesh Kumar for Alfred Capital assignment")]
 #[command(version = "0.1.0")]
+#[command(long_about = "Polygon POL Token Indexer - Real-time blockchain data analysis\n\nThis tool provides access to POL token transfer data and net-flow calculations\nfor Binance exchange addresses on the Polygon network.\n\nCreated by Agnivesh Kumar for Alfred Capital assignment")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

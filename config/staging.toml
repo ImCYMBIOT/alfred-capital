@@ -1,0 +1,41 @@
+# Staging Environment Configuration
+# For pre-production testing and validation
+
+[rpc]
+# Use testnet or reliable mainnet RPC for staging
+endpoint = "https://polygon-mumbai.g.alchemy.com/v2/YOUR_API_KEY"
+timeout_seconds = 45
+max_retries = 4
+retry_delay_seconds = 2
+max_retry_delay_seconds = 60
+
+[database]
+# Staging database configuration
+path = "/app/data/staging_blockchain.db"
+connection_pool_size = 10
+enable_wal_mode = true
+busy_timeout_ms = 5000
+
+[processing]
+# Moderate settings for staging
+poll_interval_seconds = 3
+batch_size = 75
+# POL token contract address (use testnet address for Mumbai)
+pol_token_address = "0x455e53bd25bfb4ed405b8b8c2db7ab87cd0a7e9f"
+max_blocks_per_batch = 10
+
+[api]
+enabled = true
+port = 8080
+host = "0.0.0.0"
+request_timeout_seconds = 30
+max_connections = 100
+
+[logging]
+# Detailed logging for staging validation
+level = "info"
+format = "json"
+file_enabled = true
+file_path = "/app/logs/staging_indexer.log"
+max_file_size_mb = 75
+max_files = 5

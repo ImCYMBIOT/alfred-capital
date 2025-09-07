@@ -1,0 +1,54 @@
+version: "3.8"
+
+services:
+  indexer:
+    build: .
+    container_name: polygon-pol-indexer
+    restart: unless-stopped
+    environment:
+      - RUST_LOG=info
+      - DATABASE_PATH=/app/data/blockchain.db
+      - POLYGON_RPC_URL=${POLYGON_RPC_URL:-https://polygon-rpc.com/}
+      - API_PORT=8080
+      - API_HOST=0.0.0.0
+    ports:
+      - "8080:8080"
+    volumes:
+      - indexer_data:/app/data
+      - ./config.toml:/app/config.toml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Monitoring with Prometheus (uncomment if needed)
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: prometheus
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #     - prometheus_data:/prometheus
+  #   command:
+  #     - '--config.file=/etc/prometheus/prometheus.yml'
+  #     - '--storage.tsdb.path=/prometheus'
+  #     - '--web.console.libraries=/etc/prometheus/console_libraries'
+  #     - '--web.console.templates=/etc/prometheus/consoles'
+
+volumes:
+  indexer_data:
+    driver: local
+  # prometheus_data:
+  #   driver: local
+
+networks:
+  default:
+    name: polygon-indexer-network

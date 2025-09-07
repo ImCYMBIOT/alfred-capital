@@ -366,22 +366,11 @@ impl RpcClient {
                             )
                         ))?;
                     
-                    // Convert EthLog to RawLog with error handling
+                    // Convert EthLog to RawLog with enhanced error handling
                     let mut raw_logs = Vec::new();
                     for eth_log in eth_logs {
-                        let block_number = parse_hex_to_u64(&eth_log.block_number)
-                            .map_err(|e| IndexerError::Processing(
-                                crate::error::ProcessingError::BlockParsing(
-                                    format!("Invalid block number in log: {}", e)
-                                )
-                            ))?;
-                        
-                        let log_index = parse_hex_to_u32(&eth_log.log_index)
-                            .map_err(|e| IndexerError::Processing(
-                                crate::error::ProcessingError::LogParsing(
-                                    format!("Invalid log index: {}", e)
-                                )
-                            ))?;
+                        let block_number = parse_hex_to_u64_enhanced(&eth_log.block_number)?;
+                        let log_index = parse_hex_to_u32_enhanced(&eth_log.log_index)?;
                         
                         raw_logs.push(RawLog {
                             address: eth_log.address,

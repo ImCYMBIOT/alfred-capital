@@ -3,22 +3,27 @@ mod database;
 mod models;
 mod api;
 mod error;
+mod error_recovery;
 mod logging;
 mod retry;
+mod config;
 
 #[cfg(test)]
 mod error_tests;
 
 use log::info;
-use std::env;
 
 use blockchain::{RpcClient, BlockProcessor, BlockMonitor, BlockMonitorConfig};
 use database::Database;
-use error::{IndexerError, ConfigError};
+use error::IndexerError;
 use logging::{LogContext, ErrorLogger};
+use config::AppConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Display welcome banner
+    print_startup_banner();
+    
     // Initialize structured logging
     if let Err(e) = logging::init_logging() {
         eprintln!("Failed to initialize logging: {}", e);
@@ -29,19 +34,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     context.info("Starting Polygon POL Token Indexer");
     
     // Load configuration with enhanced error handling
-    let config = match load_configuration() {
+    let config = match AppConfig::load() {
         Ok(config) => config,
         Err(e) => {
-            ErrorLogger::log_error(&e, Some(LogContext::new("main", "configuration")));
-            return Err(e.into());
+            let indexer_error = IndexerError::Config(e);
+            ErrorLogger::log_error(&indexer_error, Some(LogContext::new("main", "configuration")));
+            return Err(indexer_error.into());
         }
     };
     
     // Log configuration
     let config_context = LogContext::new("main", "configuration")
-        .with_metadata("rpc_endpoint", serde_json::json!(config.rpc_endpoint))
-        .with_metadata("database_path", serde_json::json!(config.db_path))
-        .with_metadata("poll_interval_seconds", serde_json::json!(config.poll_interval));
+        .with_metadata("rpc_endpoint", serde_json::json!(config.rpc.endpoint))
+        .with_metadata("database_path", serde_json::json!(config.database.path))
+        .with_metadata("poll_interval_seconds", serde_json::json!(config.processing.poll_interval_seconds));
     config_context.info("Configuration loaded successfully");
     
     // Initialize components with enhanced error handling
@@ -72,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => {
             let error = match e {
                 blockchain::MonitorError::Indexer(indexer_error) => indexer_error,
-                blockchain::MonitorError::Config(msg) => IndexerError::Config(ConfigError::InvalidValue {
+                blockchain::MonitorError::Config(msg) => IndexerError::Config(error::ConfigError::InvalidValue {
                     key: "monitor_config".to_string(),
                     value: msg,
                 }),
@@ -91,65 +97,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Configuration structure
-struct AppConfig {
-    rpc_endpoint: String,
-    db_path: String,
-    poll_interval: u64,
-    rpc_timeout_seconds: u64,
+fn print_startup_banner() {
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║              🚀 Polygon POL Token Indexer 🚀                ║");
+    println!("║                                                              ║");
+    println!("║         Real-time blockchain monitoring system              ║");
+    println!("║                                                              ║");
+    println!("║        Created by Agnivesh Kumar for Alfred Capital         ║");
+    println!("║                        Assignment                            ║");
+    println!("║                                                              ║");
+    println!("║              Starting blockchain monitoring...               ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
 }
 
 /// Components structure
 struct AppComponents {
     block_monitor: BlockMonitor,
-}
-
-/// Load and validate configuration from environment variables
-fn load_configuration() -> Result<AppConfig, IndexerError> {
-    let context = LogContext::new("config", "load");
-    context.debug("Loading configuration from environment variables");
-    
-    let rpc_endpoint = env::var("POLYGON_RPC_URL")
-        .unwrap_or_else(|_| "https://polygon-rpc.com/".to_string());
-    
-    // Validate RPC endpoint URL
-    if !rpc_endpoint.starts_with("http://") && !rpc_endpoint.starts_with("https://") {
-        return Err(IndexerError::Config(ConfigError::InvalidUrl(rpc_endpoint)));
-    }
-    
-    let db_path = env::var("DATABASE_PATH")
-        .unwrap_or_else(|_| "./blockchain.db".to_string());
-    
-    let poll_interval = env::var("BLOCK_POLL_INTERVAL")
-        .unwrap_or_else(|_| "2".to_string())
-        .parse::<u64>()
-        .map_err(|_| IndexerError::Config(ConfigError::InvalidValue {
-            key: "BLOCK_POLL_INTERVAL".to_string(),
-            value: env::var("BLOCK_POLL_INTERVAL").unwrap_or_default(),
-        }))?;
-    
-    // Validate poll interval
-    if poll_interval == 0 || poll_interval > 300 {
-        return Err(IndexerError::Config(ConfigError::InvalidValue {
-            key: "BLOCK_POLL_INTERVAL".to_string(),
-            value: poll_interval.to_string(),
-        }));
-    }
-    
-    let rpc_timeout_seconds = env::var("RPC_TIMEOUT_SECONDS")
-        .unwrap_or_else(|_| "30".to_string())
-        .parse::<u64>()
-        .map_err(|_| IndexerError::Config(ConfigError::InvalidValue {
-            key: "RPC_TIMEOUT_SECONDS".to_string(),
-            value: env::var("RPC_TIMEOUT_SECONDS").unwrap_or_default(),
-        }))?;
-    
-    Ok(AppConfig {
-        rpc_endpoint,
-        db_path,
-        poll_interval,
-        rpc_timeout_seconds,
-    })
 }
 
 /// Initialize all application components
@@ -158,7 +122,7 @@ async fn initialize_components(config: AppConfig) -> Result<AppComponents, Index
     
     // Initialize RPC client with timeout configuration
     context.debug("Initializing RPC client");
-    let rpc_client = RpcClient::new_with_config(config.rpc_endpoint, config.rpc_timeout_seconds);
+    let rpc_client = RpcClient::new_with_config(config.rpc.endpoint, config.rpc.timeout_seconds);
     
     // Test RPC connection
     context.debug("Testing RPC connection");
@@ -177,7 +141,7 @@ async fn initialize_components(config: AppConfig) -> Result<AppComponents, Index
     
     // Initialize database
     context.debug("Initializing database");
-    let database = Database::new(&config.db_path)
+    let database = Database::new(&config.database.path)
         .map_err(|e| IndexerError::from(e))?;
     
     // Initialize block processor
@@ -187,10 +151,10 @@ async fn initialize_components(config: AppConfig) -> Result<AppComponents, Index
     // Initialize block monitor with configuration
     context.debug("Initializing block monitor");
     let monitor_config = BlockMonitorConfig {
-        poll_interval_seconds: config.poll_interval,
-        max_retries: 5,
-        retry_delay_seconds: 2,
-        max_retry_delay_seconds: 60,
+        poll_interval_seconds: config.processing.poll_interval_seconds,
+        max_retries: config.rpc.max_retries,
+        retry_delay_seconds: config.rpc.retry_delay_seconds,
+        max_retry_delay_seconds: config.rpc.max_retry_delay_seconds,
     };
     
     let block_monitor = BlockMonitor::new(

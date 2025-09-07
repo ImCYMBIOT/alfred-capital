@@ -176,4 +176,154 @@ mod tests {
         assert!(error_string.contains("System error"));
         assert!(error_string.contains("File system error"));
     }
+
+    #[tokio::test]
+    async fn test_enhanced_retry_manager() {
+        use crate::error_recovery::EnhancedRetryManager;
+        
+        let retry_config = RetryConfig {
+            max_attempts: 2,
+            initial_delay_seconds: 1,
+            max_delay_seconds: 5,
+            backoff_multiplier: 2.0,
+            jitter: false,
+        };
+        
+        let enhanced_manager = EnhancedRetryManager::new("test_operation", retry_config);
+        
+        // Test successful operation
+        let result = enhanced_manager.execute_with_recovery(|| async {
+            Ok::<i32, IndexerError>(42)
+        }, "test_context").await;
+        
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn test_enhanced_retry_manager_with_errors() {
+        use crate::error_recovery::EnhancedRetryManager;
+        
+        let retry_config = RetryConfig {
+            max_attempts: 2,
+            initial_delay_seconds: 1,
+            max_delay_seconds: 5,
+            backoff_multiplier: 2.0,
+            jitter: false,
+        };
+        
+        let enhanced_manager = EnhancedRetryManager::new("test_operation", retry_config);
+        
+        // Test operation that always fails
+        let result = enhanced_manager.execute_with_recovery(|| async {
+            Err::<i32, IndexerError>(IndexerError::Rpc(RpcError::Timeout { seconds: 30 }))
+        }, "test_context").await;
+        
+        assert!(result.is_err());
+        
+        // Check that error statistics were recorded
+        let statistics = enhanced_manager.get_error_statistics().unwrap();
+        assert!(!statistics.is_empty());
+    }
+
+    #[test]
+    fn test_database_error_severity_classification() {
+        use crate::error::DatabaseError;
+        
+        let connection_error = IndexerError::Database(DatabaseError::Connection(
+            rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(1), None)
+        ));
+        assert_eq!(connection_error.severity(), ErrorSeverity::Critical);
+        
+        let query_error = IndexerError::Database(DatabaseError::Query("SELECT failed".to_string()));
+        assert_eq!(query_error.severity(), ErrorSeverity::Medium);
+        
+        let not_found_error = IndexerError::Database(DatabaseError::NotFound("Record not found".to_string()));
+        assert_eq!(not_found_error.severity(), ErrorSeverity::Medium);
+    }
+
+    #[test]
+    fn test_network_error_recoverability() {
+        use crate::error::NetworkError;
+        
+        let timeout_error = IndexerError::Network(NetworkError::Timeout);
+        assert!(timeout_error.is_recoverable());
+        assert_eq!(timeout_error.retry_delay(), Some(5));
+        
+        let connection_refused = IndexerError::Network(NetworkError::ConnectionRefused);
+        assert!(connection_refused.is_recoverable());
+        assert_eq!(connection_refused.retry_delay(), Some(15));
+        
+        let unreachable = IndexerError::Network(NetworkError::Unreachable);
+        assert_eq!(unreachable.severity(), ErrorSeverity::High);
+    }
+
+    #[test]
+    fn test_processing_error_scenarios() {
+        use crate::error::ProcessingError;
+        
+        let block_parsing_error = ProcessingError::BlockParsing("Invalid JSON".to_string());
+        let indexer_error = IndexerError::Processing(block_parsing_error);
+        assert_eq!(indexer_error.severity(), ErrorSeverity::Medium);
+        assert!(!indexer_error.is_recoverable());
+        
+        let overflow_error = ProcessingError::Overflow("Amount too large".to_string());
+        let indexer_error = IndexerError::Processing(overflow_error);
+        assert_eq!(format!("{}", indexer_error), "Processing error: Calculation overflow: Amount too large");
+    }
+
+    #[test]
+    fn test_validation_error_scenarios() {
+        use crate::error::ValidationError;
+        
+        let invalid_address = ValidationError::InvalidAddress("0xinvalid".to_string());
+        let indexer_error = IndexerError::Validation(invalid_address);
+        assert_eq!(indexer_error.severity(), ErrorSeverity::Low);
+        assert!(!indexer_error.is_recoverable());
+        
+        let out_of_range = ValidationError::OutOfRange("Block number too high".to_string());
+        let indexer_error = IndexerError::Validation(out_of_range);
+        assert_eq!(format!("{}", indexer_error), "Validation error: Value out of range: Block number too high");
+    }
+
+    #[test]
+    fn test_system_error_scenarios() {
+        use crate::error::SystemError;
+        
+        let out_of_memory = SystemError::OutOfMemory;
+        let indexer_error = IndexerError::System(out_of_memory);
+        assert_eq!(indexer_error.severity(), ErrorSeverity::Critical);
+        assert!(!indexer_error.is_recoverable());
+        
+        let resource_exhausted = SystemError::ResourceExhausted("Too many connections".to_string());
+        let indexer_error = IndexerError::System(resource_exhausted);
+        assert!(indexer_error.is_recoverable());
+        assert_eq!(indexer_error.retry_delay(), Some(30));
+    }
+
+    #[test]
+    fn test_error_conversion_completeness() {
+        // Test that all error conversions work properly
+        let legacy_rpc_error = crate::blockchain::rpc_client::RpcError::Rpc("Test error".to_string());
+        let converted: IndexerError = legacy_rpc_error.into();
+        assert!(matches!(converted, IndexerError::Rpc(_)));
+        
+        let legacy_db_error = crate::database::DbError::Operation("Test error".to_string());
+        let converted: IndexerError = legacy_db_error.into();
+        assert!(matches!(converted, IndexerError::Database(_)));
+    }
+
+    #[test]
+    fn test_error_metadata_preservation() {
+        // Test that error metadata is preserved through conversions
+        let rpc_error = RpcError::Method {
+            code: -32601,
+            message: "Method not found".to_string(),
+        };
+        let indexer_error = IndexerError::Rpc(rpc_error);
+        
+        let error_string = format!("{}", indexer_error);
+        assert!(error_string.contains("-32601"));
+        assert!(error_string.contains("Method not found"));
+    }
 }

@@ -1,22 +1,26 @@
 use clap::Parser;
 use polygon_pol_indexer::api::{CliHandler, Cli};
 use polygon_pol_indexer::database::Database;
+use polygon_pol_indexer::config::AppConfig;
 use std::sync::Arc;
-use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logger for CLI (less verbose than the main indexer)
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     
+    // Display welcome banner
+    print_banner();
+    
     // Parse command line arguments
     let cli = Cli::parse();
     
-    // Get database path from CLI args or environment variable
+    // Load configuration and get database path
+    let config = AppConfig::load().unwrap_or_default();
     let db_path = if cli.database != "./blockchain.db" {
         cli.database.clone()
     } else {
-        env::var("DATABASE_PATH").unwrap_or_else(|_| cli.database.clone())
+        config.database.path
     };
     
     // Initialize database connection
@@ -39,4 +43,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     Ok(())
+}
+
+fn print_banner() {
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║              🔗 Polygon POL Token Indexer 🔗                ║");
+    println!("║                                                              ║");
+    println!("║           Real-time blockchain data analysis tool           ║");
+    println!("║                                                              ║");
+    println!("║        Created by Agnivesh Kumar for Alfred Capital         ║");
+    println!("║                        Assignment                            ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
 }

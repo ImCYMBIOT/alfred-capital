@@ -9,8 +9,9 @@ use log::{info, warn, error, debug};
 use crate::blockchain::{RpcClient, BlockProcessor};
 use crate::database::Database;
 use crate::error::IndexerError;
+use crate::error_recovery::{ErrorRecoveryManager, EnhancedRetryManager};
 use crate::logging::{LogContext, PerformanceMonitor, ErrorLogger, MetricsLogger};
-use crate::retry::CircuitBreaker;
+use crate::retry::{CircuitBreaker, RetryConfig};
 
 #[derive(Error, Debug)]
 pub enum MonitorError {
@@ -66,6 +67,7 @@ pub struct BlockMonitor {
     pub shutdown_signal: Arc<AtomicBool>,
     rpc_circuit_breaker: Arc<CircuitBreaker>,
     database_circuit_breaker: Arc<CircuitBreaker>,
+    error_recovery_manager: Arc<ErrorRecoveryManager>,
 }
 
 impl BlockMonitor {
@@ -86,6 +88,7 @@ impl BlockMonitor {
             shutdown_signal: Arc::new(AtomicBool::new(false)),
             rpc_circuit_breaker: Arc::new(CircuitBreaker::new(5, 60)), // 5 failures, 60s recovery
             database_circuit_breaker: Arc::new(CircuitBreaker::new(3, 30)), // 3 failures, 30s recovery
+            error_recovery_manager: Arc::new(ErrorRecoveryManager::new()),
         }
     }
 
@@ -313,6 +316,17 @@ impl BlockMonitor {
             current_net_flow: net_flow_data.net_flow,
             is_running: !self.shutdown_signal.load(Ordering::Relaxed),
         })
+    }
+
+    /// Get error statistics from the error recovery manager
+    pub fn get_error_statistics(&self) -> Result<Vec<crate::error_recovery::ErrorStatistic>, MonitorError> {
+        self.error_recovery_manager.get_error_statistics()
+            .map_err(|e| MonitorError::Indexer(e))
+    }
+
+    /// Record an error for pattern analysis
+    pub fn record_error(&self, error: &IndexerError, context: &str) {
+        self.error_recovery_manager.record_error(error, context);
     }
 }
 

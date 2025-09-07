@@ -1,0 +1,42 @@
+# Production Environment Configuration
+# Optimized for production deployment
+
+[rpc]
+# Use premium RPC endpoint for production reliability
+# Replace with your preferred provider (Alchemy, Infura, etc.)
+endpoint = "https://polygon-mainnet.g.alchemy.com/v2/YOUR_API_KEY"
+timeout_seconds = 60
+max_retries = 5
+retry_delay_seconds = 2
+max_retry_delay_seconds = 120
+
+[database]
+# Production database with optimizations
+path = "/app/data/blockchain.db"
+connection_pool_size = 20
+enable_wal_mode = true
+busy_timeout_ms = 10000
+
+[processing]
+# Optimized for production throughput
+poll_interval_seconds = 2
+batch_size = 100
+# POL token contract address on Polygon (verify this address)
+pol_token_address = "0x455e53bd25bfb4ed405b8b8c2db7ab87cd0a7e9f"
+max_blocks_per_batch = 20
+
+[api]
+enabled = true
+port = 8080
+host = "0.0.0.0"  # Bind to all interfaces in production
+request_timeout_seconds = 30
+max_connections = 200
+
+[logging]
+# Production logging - info level to reduce noise
+level = "info"
+format = "json"  # Structured logging for log aggregation
+file_enabled = true
+file_path = "/app/logs/indexer.log"
+max_file_size_mb = 100
+max_files = 10

@@ -1,0 +1,39 @@
+[Unit]
+Description=Polygon POL Token Indexer
+Documentation=https://github.com/your-org/polygon-pol-indexer
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=indexer
+Group=indexer
+WorkingDirectory=/var/lib/polygon-pol-indexer
+ExecStart=/opt/polygon-pol-indexer/indexer --config /etc/polygon-pol-indexer/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polygon-pol-indexer
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/polygon-pol-indexer /var/log/polygon-pol-indexer
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Environment variables
+Environment=RUST_LOG=info
+Environment=CONFIG_PATH=/etc/polygon-pol-indexer/config.toml
+
+[Install]
+WantedBy=multi-user.target

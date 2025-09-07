@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-use polygon_pol_indexer::blockchain::{RpcClient, BlockProcessor, TransferDetector};
+use polygon_pol_indexer::blockchain::TransferDetector;
 use polygon_pol_indexer::database::Database;
-use polygon_pol_indexer::models::{ProcessedTransfer, TransferDirection, RawLog, NetFlowData};
+use polygon_pol_indexer::models::{ProcessedTransfer, TransferDirection, RawLog};
 use polygon_pol_indexer::blockchain::transfer_detector::{POL_TOKEN_ADDRESS, TRANSFER_EVENT_SIGNATURE, BINANCE_ADDRESSES};
 
 /// Test validation against known POL transfer transaction patterns
@@ -107,7 +106,7 @@ fn test_binance_address_classification() {
             direction: TransferDirection::NotRelevant, // Will be classified
         };
         
-        let classified_inflow = transfer_detector.classify_transfer_direction(&inflow_transfer);
+        let classified_inflow = transfer_detector.classify_transfer(&inflow_transfer.from_address, &inflow_transfer.to_address);
         assert_eq!(classified_inflow, TransferDirection::ToBinance, 
             "Should classify as inflow for address {}", binance_addr);
         
@@ -123,7 +122,7 @@ fn test_binance_address_classification() {
             direction: TransferDirection::NotRelevant, // Will be classified
         };
         
-        let classified_outflow = transfer_detector.classify_transfer_direction(&outflow_transfer);
+        let classified_outflow = transfer_detector.classify_transfer(&outflow_transfer.from_address, &outflow_transfer.to_address);
         assert_eq!(classified_outflow, TransferDirection::FromBinance, 
             "Should classify as outflow for address {}", binance_addr);
     }
@@ -148,7 +147,7 @@ fn test_binance_address_classification() {
             direction: TransferDirection::NotRelevant,
         };
         
-        let classified = transfer_detector.classify_transfer_direction(&transfer);
+        let classified = transfer_detector.classify_transfer(&transfer.from_address, &transfer.to_address);
         assert_eq!(classified, TransferDirection::NotRelevant, 
             "Should classify as not relevant for non-Binance address {}", addr);
     }

@@ -1,0 +1,41 @@
+# Development Environment Configuration
+# For local development and testing
+
+[rpc]
+# Use public Polygon RPC for development
+endpoint = "https://polygon-rpc.com/"
+timeout_seconds = 30
+max_retries = 3
+retry_delay_seconds = 1
+max_retry_delay_seconds = 30
+
+[database]
+# Local development database
+path = "./dev_blockchain.db"
+connection_pool_size = 5
+enable_wal_mode = true
+busy_timeout_ms = 3000
+
+[processing]
+# Faster polling for development
+poll_interval_seconds = 5
+batch_size = 50
+# POL token contract address on Polygon (placeholder)
+pol_token_address = "0x455e53bd25bfb4ed405b8b8c2db7ab87cd0a7e9f"
+max_blocks_per_batch = 5
+
+[api]
+enabled = true
+port = 8080
+host = "127.0.0.1"
+request_timeout_seconds = 30
+max_connections = 50
+
+[logging]
+# Verbose logging for development
+level = "debug"
+format = "pretty"
+file_enabled = true
+file_path = "./logs/dev_indexer.log"
+max_file_size_mb = 50
+max_files = 3

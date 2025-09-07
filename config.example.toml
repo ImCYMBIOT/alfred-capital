@@ -1,0 +1,61 @@
+# Polygon POL Token Indexer Configuration
+# Copy this file to config.toml and modify as needed
+
+[rpc]
+# Polygon RPC endpoint URL
+endpoint = "https://polygon-rpc.com/"
+# Request timeout in seconds
+timeout_seconds = 30
+# Maximum number of retry attempts
+max_retries = 5
+# Initial retry delay in seconds
+retry_delay_seconds = 2
+# Maximum retry delay in seconds
+max_retry_delay_seconds = 60
+
+[database]
+# SQLite database file path
+path = "./blockchain.db"
+# Connection pool size
+connection_pool_size = 10
+# Enable WAL mode for better concurrency
+enable_wal_mode = true
+# Database busy timeout in milliseconds
+busy_timeout_ms = 5000
+
+[processing]
+# Block polling interval in seconds
+poll_interval_seconds = 2
+# Batch size for processing multiple blocks
+batch_size = 100
+# POL token contract address on Polygon
+# Note: This is a placeholder - update with actual POL token address
+pol_token_address = "0x455e53bd25bfb4ed405b8b8c2db7ab87cd0a7e9f"
+# Maximum blocks to process in a single batch
+max_blocks_per_batch = 10
+
+[api]
+# Enable HTTP API server
+enabled = true
+# Server port
+port = 8080
+# Server host/bind address
+host = "127.0.0.1"
+# Request timeout in seconds
+request_timeout_seconds = 30
+# Maximum concurrent connections
+max_connections = 100
+
+[logging]
+# Log level (error, warn, info, debug, trace)
+level = "info"
+# Log format (json, pretty)
+format = "pretty"
+# Enable file logging
+file_enabled = false
+# Log file path (if file logging enabled)
+# file_path = "./logs/indexer.log"
+# Maximum log file size in MB
+max_file_size_mb = 100
+# Number of log files to keep
+max_files = 5

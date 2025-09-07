@@ -326,13 +326,23 @@ impl CircuitBreaker {
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T, IndexerError>>,
     {
-        // Check current state
+        // Check current state with proper error handling
         let current_state = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().map_err(|_| {
+                IndexerError::System(crate::error::SystemError::ResourceExhausted(
+                    "Circuit breaker state lock poisoned".to_string()
+                ))
+            })?;
             
             // Check if we should transition from Open to HalfOpen
             if *state == CircuitBreakerState::Open {
-                if let Some(last_failure) = *self.last_failure_time.lock().unwrap() {
+                let last_failure_time = self.last_failure_time.lock().map_err(|_| {
+                    IndexerError::System(crate::error::SystemError::ResourceExhausted(
+                        "Circuit breaker failure time lock poisoned".to_string()
+                    ))
+                })?;
+                
+                if let Some(last_failure) = *last_failure_time {
                     if last_failure.elapsed().as_secs() >= self.recovery_timeout_seconds {
                         *state = CircuitBreakerState::HalfOpen;
                         let context = LogContext::new("circuit_breaker", "state_transition")
@@ -348,6 +358,10 @@ impl CircuitBreaker {
 
         match current_state {
             CircuitBreakerState::Open => {
+                let context = LogContext::new("circuit_breaker", "request_rejected")
+                    .with_metadata("state", serde_json::json!("Open"));
+                context.warn("Request rejected due to open circuit breaker");
+                
                 return Err(IndexerError::System(crate::error::SystemError::ResourceExhausted(
                     "Circuit breaker is open".to_string()
                 )));
@@ -357,21 +371,37 @@ impl CircuitBreaker {
                     Ok(result) => {
                         // Success - reset failure count and close circuit
                         self.current_failures.store(0, std::sync::atomic::Ordering::Relaxed);
-                        *self.state.lock().unwrap() = CircuitBreakerState::Closed;
+                        
+                        if let Ok(mut state) = self.state.lock() {
+                            if *state == CircuitBreakerState::HalfOpen {
+                                *state = CircuitBreakerState::Closed;
+                                let context = LogContext::new("circuit_breaker", "state_transition")
+                                    .with_metadata("from", serde_json::json!("HalfOpen"))
+                                    .with_metadata("to", serde_json::json!("Closed"));
+                                context.info("Circuit breaker closed after successful operation");
+                            }
+                        }
+                        
                         Ok(result)
                     }
                     Err(error) => {
                         // Failure - increment counter and potentially open circuit
                         let failures = self.current_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                        *self.last_failure_time.lock().unwrap() = Some(std::time::Instant::now());
+                        
+                        if let Ok(mut failure_time) = self.last_failure_time.lock() {
+                            *failure_time = Some(std::time::Instant::now());
+                        }
 
                         if failures >= self.failure_threshold {
-                            *self.state.lock().unwrap() = CircuitBreakerState::Open;
-                            let context = LogContext::new("circuit_breaker", "state_transition")
-                                .with_metadata("from", serde_json::json!(format!("{:?}", current_state)))
-                                .with_metadata("to", serde_json::json!("Open"))
-                                .with_metadata("failure_count", serde_json::json!(failures));
-                            context.error("Circuit breaker opened due to repeated failures");
+                            if let Ok(mut state) = self.state.lock() {
+                                *state = CircuitBreakerState::Open;
+                                let context = LogContext::new("circuit_breaker", "state_transition")
+                                    .with_metadata("from", serde_json::json!(format!("{:?}", current_state)))
+                                    .with_metadata("to", serde_json::json!("Open"))
+                                    .with_metadata("failure_count", serde_json::json!(failures))
+                                    .with_metadata("threshold", serde_json::json!(self.failure_threshold));
+                                context.error("Circuit breaker opened due to repeated failures");
+                            }
                         }
 
                         Err(error)
